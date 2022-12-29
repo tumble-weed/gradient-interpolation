@@ -10,7 +10,7 @@ import torch
 from utils import get_mask_th
 from solve import estimate_abc
 import numpy as np
-# from inference import get_change_in_f_as_function
+
 from approximation import get_approx_change_in_f_as_function
 TODO = None
 def setup(ndim,nthresh):
@@ -46,9 +46,10 @@ class GradientInterpolator():
                             x,s,
                             M,Mfixed[:,0],Mfixed[:,1],
                             t,ti[0],ti[1])
-    
+        self.get_multiplier_of_a_,self.get_lhs_constant_ = self.setup_linear_system_()
+        self.get_change_in_f_as_function_()
 
-    def setup_linear_system(self):
+    def setup_linear_system_(self):
         lin_eq1 = setup_change_in_f_linear_equation(
             self.approx_change_in_f,
             # to_replace,
@@ -71,12 +72,26 @@ class GradientInterpolator():
         self.get_lhs_constant_ = get_lhs_constant_
         return get_multiplier_of_a_,get_lhs_constant_
 
-    def solve(self,g_at_0_,g_at_1_,f0_,f1_,m_at_0_,m_at_1_):
-        get_multiplier_of_a_,get_lhs_constant_ = self.setup_linear_system()
-        estimated_a,estimated_b,estimated_c = estimate_abc(m_at_0_,m_at_1_,g_at_0_,g_at_1_,f0_,f1_,get_multiplier_of_a_,get_lhs_constant_)
+    def solve(self,g_at_0s_,g_at_1s_,f0s_,f1s_,m_at_0s_,m_at_1s_):
+        # import pdb;pdb.set_trace()
+        
+        if g_at_0s_.ndim == 1:
+            g_at_0s_,g_at_1s_,f0s_,f1s_,m_at_0s_,m_at_1s_ = torch.atleast_2d(g_at_0s_),torch.atleast_2d(g_at_1s_),torch.atleast_2d(f0s_),torch.atleast_2d(f1s_),torch.atleast_2d(m_at_0s_),torch.atleast_2d(m_at_1s_)
+        nintervals = m_at_1s_.shape[-1]
+        estimated_a,estimated_b,estimated_c = [],[],[]
+        
+        # for g_at_0_,g_at_1_,f0_,f1_,m_at_0_,m_at_1_ in zip(g_at_0s_,g_at_1s_,f0s_,f1s_,m_at_0s_,m_at_1s_):
+        for ti in range(nintervals):
+            g_at_0_,g_at_1_,f0_,f1_,m_at_0_,m_at_1_ = g_at_0s_[:,ti],g_at_1s_[:,ti],f0s_[ti],f1s_[ti],m_at_0s_[:,ti],m_at_1s_[:,ti]
+            # import pdb;pdb.set_trace()
+            estimated_ai,estimated_bi,estimated_ci = estimate_abc(m_at_0_,m_at_1_,g_at_0_,g_at_1_,f0_,f1_,self.get_multiplier_of_a_,self.get_lhs_constant_)
+            estimated_a.append(estimated_ai) 
+            estimated_b.append(estimated_bi)
+            estimated_c.append(estimated_ci)
+        estimated_a,estimated_b,estimated_c = torch.stack(estimated_a,dim=-1),torch.stack(estimated_b,dim=-1),torch.stack(estimated_c,dim=-1)
         return estimated_a,estimated_b,estimated_c
 
-    def get_change_in_f_as_function(self):
+    def get_change_in_f_as_function_(self):
         self.get_change_in_f_ = get_approx_change_in_f_as_function(
                         self.approx_change_in_f,
                           self.a,self.b,self.c,
@@ -92,7 +107,7 @@ class GradientInterpolator():
 #=========================================================================
 
 ndim = 250*250
-nthresh = 2
+nthresh = 10
 if True:
     f_obs_ = torch.randn(nthresh)
     g_ = torch.randn(ndim,nthresh)
@@ -104,36 +119,50 @@ else:
     g_[:,-1] = 1
     x_ = torch.zeros(ndim).double()
     x_[1] = 1
-Tfixed_ = torch.tensor([0.,1.])[None,:].double()
+Tfixed_ = torch.tensor(np.linspace(0,1,nthresh))[None,:].double()
 s_ = 1.
 Mfixed_ = get_mask_th(x_.unsqueeze(-1),s_,Tfixed_)
+
 assert Mfixed_.shape == (ndim,nthresh)
 grad_interpolator = GradientInterpolator()
-grad_interpolator.setup_linear_system()
+grad_interpolator.setup_linear_system_()
 
 # grad_interpolator.get_multiplier_of_a_(Mfixed_[:,0],Mfixed_[:,1])
 # grad_interpolator.get_lhs_constant_(Mfixed_[:,0],Mfixed_[:,1],g_[:,0],g_[:,1])
 
-estimated_a,estimated_b,estimated_c = grad_interpolator.solve(g_[:,0],g_[:,1],f_obs_[0],f_obs_[1],Mfixed_[:,0],Mfixed_[:,1])
-assert isinstance(estimated_a,torch.Tensor)
-assert isinstance(estimated_b,torch.Tensor)
+estimated_a,estimated_b,estimated_c = grad_interpolator.solve(g_[:,:-1],g_[:,1:],f_obs_[:-1],f_obs_[1:],Mfixed_[:,:-1],Mfixed_[:,1:])
+# assert isinstance(estimated_a,torch.Tensor)
+# assert isinstance(estimated_b,torch.Tensor)
 
-grad_interpolator.get_change_in_f_as_function()
-obs_change_in_f_ = f_obs_[-1] - f_obs_[0]
-integrate_grad_wrt_x = estimated_change_in_f_ = grad_interpolator.get_change_in_f_(
+# grad_interpolator.get_change_in_f_as_function_()
+obs_change_in_f_ = f_obs_[1:] - f_obs_[:-1]
+# '''
+integrate_grad_wrt_x = estimated_change_in_f_ = torch.zeros(ndim,nthresh-1)
+for i in range(nthresh-1):
+    integrate_grad_wrt_xi = estimated_change_in_f_i = grad_interpolator.get_change_in_f_(
+        estimated_a[:,i],estimated_b[:,i],estimated_c[:,i],
+        x_,s_,
+        Mfixed_[:,i],
+        Tfixed_[:,i],Tfixed_[:,i+1]
+    )
+    integrate_grad_wrt_x[:,i] = (integrate_grad_wrt_xi)
+# '''
+"""
+for estimated_a,estimated_b,estimated_c in 
+    grad_interpolator.get_change_in_f_(
         estimated_a,estimated_b,estimated_c,
         x_,s_,
         Mfixed_[:,0],
         0,1
     
 )
-
-print('difference between estimated and observed change in f',(estimated_change_in_f_.sum()-obs_change_in_f_).abs().sum())
+"""
+print('difference between estimated and observed change in f',(estimated_change_in_f_.sum(dim=0)-obs_change_in_f_).abs().sum())
 # import IPython;IPython.embed()
 
 get_approx_df_by_dM_ = grad_interpolator.get_approx_df_by_dM()
-estimated_g_at_0_ = get_approx_df_by_dM_(Mfixed_[:,0]-Mfixed_[:,0],estimated_a,estimated_b,estimated_c)
-estimated_g_at_1_ = get_approx_df_by_dM_(Mfixed_[:,1]-Mfixed_[:,0],estimated_a,estimated_b,estimated_c)
+estimated_g_at_0_ = get_approx_df_by_dM_(Mfixed_[:,0]-Mfixed_[:,0],estimated_a[:,0],estimated_b[:,0],estimated_c[:,0])
+estimated_g_at_1_ = get_approx_df_by_dM_(Mfixed_[:,1]-Mfixed_[:,0],estimated_a[:,0],estimated_b[:,0],estimated_c[:,0])
 print( (estimated_g_at_0_-g_[:,0]).abs().sum())
 print( (estimated_g_at_1_-g_[:,1]).abs().sum())
 import IPython;IPython.embed()
